@@ -3,10 +3,10 @@ const axios = require('axios');
 const yaml = require('js-yaml');
 const app = express();
 
-// 默认的流量订阅链接（请修改为你真实的流量信息接口地址）
+// 默认的流量信息接口（请根据实际情况修改）
 const DEFAULT_TRAFFIC_URL = 'https://traffic.example.com/traffic';
 
-// 简单生成 UUID 的函数（v4）
+// 生成 UUID 的函数（v4）
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
      var r = Math.random() * 16 | 0, v = c === 'x' ? r : ((r & 0x3) | 0x8);
@@ -14,12 +14,11 @@ function generateUUID() {
   });
 }
 
-// 新版转义函数：对名称中非 ASCII 字符进行 Unicode 转义
+// 转义函数：对名称中非 ASCII 字符进行 Unicode 转义（正确处理高位码点）
 function escapeUnicode(str) {
   return Array.from(str).map(ch => {
     const code = ch.codePointAt(0);
     if (code > 127) {
-      // 如果码点小于 0x10000 用 \uXXXX，大于则用 \UXXXXXXXX
       if (code < 0x10000) {
         return "\\u" + code.toString(16).padStart(4, '0').toUpperCase();
       } else {
@@ -31,28 +30,25 @@ function escapeUnicode(str) {
   }).join('');
 }
 
-// 根据 proxies 数组构造符合要求的 YAML 字符串
-// trafficData 为流量信息对象，假设格式为 { uuid1: { flow: "xxx" }, uuid2: { flow: "xxx" } }
+// 根据 proxies 数组生成符合要求的 YAML 块，新增 uuid 与 flow 字段
+// trafficData 为流量信息对象，假设格式为 { "<uuid>": { flow: "实际流量数据" }, ... }
 function buildProxiesString(proxiesArray, trafficData = {}) {
   return proxiesArray.map(proxy => {
-    // 若缺少 uuid，则自动生成
+    // 自动生成 uuid 如果缺失
     if (!proxy.uuid) {
       proxy.uuid = generateUUID();
     }
-    // 处理名称转义
     const name = escapeUnicode(proxy.name || '');
     const type = proxy.type || 'ss';
     const server = proxy.server || '';
     const port = proxy.port || '';
     const cipher = proxy.cipher || 'chacha20-ietf-poly1305';
     const password = proxy.password || '';
-    // 如果 proxy.udp 存在，则取其值，否则默认 true
     const udp = (proxy.udp !== undefined ? proxy.udp : true);
-    // 从 trafficData 中查找对应 uuid 的流量信息；若没有则用 "N/A"
-    const flow = trafficData[proxy.uuid] && trafficData[proxy.uuid].flow 
+    // 从流量数据中查找对应 uuid 的流量信息，若无则显示 "N/A"
+    const flow = (trafficData[proxy.uuid] && trafficData[proxy.uuid].flow) 
                  ? `"${trafficData[proxy.uuid].flow}"`
                  : `"N/A"`;
-    // 输出时严格按照要求的顺序和缩进
     return `  - name: "${name}"
     type: ${type}
     server: ${server}
@@ -65,8 +61,7 @@ function buildProxiesString(proxiesArray, trafficData = {}) {
   }).join('\n');
 }
 
-// 固定模板字符串，除 proxies 部分外其他保持不变
-// 注意模板中必须包含以 "dns:" 开头的行，作为替换标记
+// 固定模板字符串（其他部分保持不变），其中 proxies 块会被替换
 const configTemplate = `proxies:
   - name: "\\U0001F1ED\\U0001F1F0 香港 01 IEPL「CRON」"
     type: ss
@@ -521,12 +516,14 @@ app.get('/', async (req, res) => {
   try {
     const subUrl = req.query.url;
     if (!subUrl) return res.status(400).send('请提供订阅链接，例如 ?url=你的订阅地址');
+    // 若提供了 trafficUrl 参数则使用，否则使用默认的
+    const trafficUrl = req.query.trafficUrl || DEFAULT_TRAFFIC_URL;
 
-    // 1. 获取订阅数据
+    // 1. 获取订阅数据（代理节点）
     let subData = (await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' } })).data;
     console.log('获取到订阅数据');
 
-    // 2. 如果是 Base64 编码，则尝试解码
+    // 2. 尝试 Base64 解码
     try {
       const decoded = Buffer.from(subData, 'base64').toString('utf8');
       if (decoded.includes('proxies:') || decoded.includes('port:')) {
@@ -547,10 +544,10 @@ app.get('/', async (req, res) => {
     }
     console.log('解析出 proxies 数组，数量：', subConfig.proxies.length);
 
-    // 4. 获取流量信息（如果流量订阅接口可用）
+    // 4. 获取流量信息（默认接口或 trafficUrl 参数提供的接口）
     let trafficData = {};
     try {
-      const trafficResp = await axios.get(DEFAULT_TRAFFIC_URL, { headers: { 'User-Agent': 'Clash Verge' } });
+      const trafficResp = await axios.get(trafficUrl, { headers: { 'User-Agent': 'Clash Verge' } });
       // 假设返回数据格式为 { "<uuid>": { flow: "实际流量数据" }, ... }
       trafficData = trafficResp.data;
       console.log('获取到流量数据');
