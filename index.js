@@ -3,14 +3,24 @@ const axios = require('axios');
 const yaml = require('js-yaml');
 const app = express();
 
-// 辅助函数：对名称中非 ASCII 字符进行 Unicode 转义
+// 新版转义函数：遍历完整 Unicode 码点
 function escapeUnicode(str) {
-  return str.replace(/[\u0080-\uFFFF]/g, function(c) {
-    return '\\U' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4).toUpperCase();
-  });
+  return Array.from(str).map(ch => {
+    const code = ch.codePointAt(0);
+    if (code > 127) {
+      // 如果码点小于 0x10000 用 \uXXXX，大于则用 \UXXXXXXXX
+      if (code < 0x10000) {
+        return "\\u" + code.toString(16).padStart(4, '0').toUpperCase();
+      } else {
+        return "\\U" + code.toString(16).padStart(8, '0').toUpperCase();
+      }
+    } else {
+      return ch;
+    }
+  }).join('');
 }
 
-// 根据 proxies 数组构造符合要求的 YAML 字符串
+// 根据 proxies 数组构造符合要求的 YAML 字符串，保证顺序、缩进、转义符合示例格式
 function buildProxiesString(proxiesArray) {
   return proxiesArray.map(proxy => {
     const name = escapeUnicode(proxy.name || '');
@@ -19,7 +29,7 @@ function buildProxiesString(proxiesArray) {
     const port = proxy.port || '';
     const cipher = proxy.cipher || 'chacha20-ietf-poly1305';
     const password = proxy.password || '';
-    const udp = proxy.udp !== undefined ? proxy.udp : true;
+    const udp = (proxy.udp !== undefined ? proxy.udp : true);
     return `  - name: "${name}"
     type: ${type}
     server: ${server}
@@ -30,7 +40,7 @@ function buildProxiesString(proxiesArray) {
   }).join('\n');
 }
 
-// 固定模板字符串（注意：模板中必须包含 dns: 这一行，作为正则替换的标志）
+// 固定模板字符串，注意模板中必须包含 "dns:" 这一行作为分隔标志
 const configTemplate = `proxies:
   - name: "\\U0001F1ED\\U0001F1F0 香港 01 IEPL「CRON」"
     type: ss
