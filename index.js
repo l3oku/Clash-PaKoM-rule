@@ -3,24 +3,24 @@ const axios = require('axios');
 const yaml = require('js-yaml');
 const app = express();
 
-// 辅助函数：对名称中非 ASCII 字符进行 Unicode 转义
+// 辅助函数：对字符串中非 ASCII 字符进行 Unicode 转义
 function escapeUnicode(str) {
   return str.replace(/[\u0080-\uFFFF]/g, function(c) {
     return '\\U' + ('0000' + c.charCodeAt(0).toString(16)).slice(-4).toUpperCase();
   });
 }
 
-// 根据 proxies 数组构造符合要求的 YAML 字符串，保证顺序、缩进、转义符合示例格式
+// 根据 proxies 数组构造符合要求的 YAML 字符串（严格按照示例格式输出）
 function buildProxiesString(proxiesArray) {
   return proxiesArray.map(proxy => {
-    // 确保各字段存在且数据正确
     const name = escapeUnicode(proxy.name || '');
     const type = proxy.type || 'ss';
     const server = proxy.server || '';
     const port = proxy.port || '';
     const cipher = proxy.cipher || 'chacha20-ietf-poly1305';
     const password = proxy.password || '';
-    const udp = proxy.udp !== undefined ? proxy.udp : true;
+    // udp 字段布尔值直接输出 true/false
+    const udp = (proxy.udp !== undefined ? proxy.udp : true) ? 'true' : 'false';
     return `  - name: "${name}"
     type: ${type}
     server: ${server}
@@ -31,7 +31,7 @@ function buildProxiesString(proxiesArray) {
   }).join('\n');
 }
 
-// 整体配置模板（除 proxies 部分外保持不变），注意模板中 proxies 块会被替换
+// 整体配置模板（除 proxies 部分外，其他部分保持固定格式，注意这里仅用于格式替换）
 const configTemplate = `proxies:
   - name: "\\U0001F1ED\\U0001F1F0 香港 01 IEPL「CRON」"
     type: ss
@@ -482,41 +482,45 @@ rules:
   - 'MATCH,PAKO'
 `;
 
-try {
-  const subUrl = req.query.url;
-  if (!subUrl) return res.status(400).send('请提供订阅链接，例如 ?url=你的订阅地址');
-
-  // 1. 获取订阅数据
-  let subData = (await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' } })).data;
-  
-  // 2. 如有必要，尝试 Base64 解码
+app.get('/', async (req, res) => {
   try {
-    const decoded = Buffer.from(subData, 'base64').toString('utf8');
-    if (decoded.includes('proxies:') || decoded.includes('port:')) {
-      subData = decoded;
+    const subUrl = req.query.url;
+    if (!subUrl) return res.status(400).send('请提供订阅链接，例如 ?url=你的订阅地址');
+
+    // 1. 获取订阅数据
+    let subData = (await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' } })).data;
+
+    // 2. 尝试 Base64 解码（如果数据为 Base64 编码）
+    try {
+      const decoded = Buffer.from(subData, 'base64').toString('utf8');
+      if (decoded.includes('proxies:') || decoded.includes('port:')) {
+        subData = decoded;
+      }
+    } catch (e) {
+      console.error('Base64 解码失败：', e);
     }
-  } catch (e) {}
 
-  // 3. 解析订阅数据中的 YAML
-  let subConfig = {};
-  if (subData.includes('proxies:')) {
-    subConfig = yaml.load(subData);
+    // 3. 解析 YAML 获取 proxies 数组
+    let subConfig = {};
+    if (subData.includes('proxies:')) {
+      subConfig = yaml.load(subData);
+    }
+    if (!subConfig.proxies || !Array.isArray(subConfig.proxies) || subConfig.proxies.length === 0) {
+      return res.status(400).send('订阅数据中未包含有效的节点信息');
+    }
+
+    // 4. 根据订阅数据生成新的 proxies 字符串
+    const newProxiesStr = buildProxiesString(subConfig.proxies);
+
+    // 5. 用正则替换模板中原有的 proxies 块（从开头到第一行 "dns:" 前）
+    const outputConfig = configTemplate.replace(/^(proxies:\n)([\s\S]*?)(?=^dns:)/m, `proxies:\n${newProxiesStr}\n`);
+
+    res.set('Content-Type', 'text/yaml');
+    res.send(outputConfig);
+  } catch (error) {
+    console.error('处理过程中出错：', error);
+    res.status(500).send(`转换失败：${error.message}`);
   }
-  if (!subConfig.proxies || !Array.isArray(subConfig.proxies) || subConfig.proxies.length === 0) {
-    return res.status(400).send('订阅数据中未包含有效的节点信息');
-  }
-
-  // 4. 根据订阅的 proxies 数组构造新的 proxies 字符串
-  const newProxiesStr = buildProxiesString(subConfig.proxies);
-
-  // 5. 用正则替换模板中从开头到第一行以 "dns:" 开始前的 proxies 部分
-  const outputConfig = configTemplate.replace(/^(proxies:\n)([\s\S]*?)(?=^dns:)/m, `proxies:\n${newProxiesStr}\n`);
-
-  res.set('Content-Type', 'text/yaml');
-  res.send(outputConfig);
-} catch (error) {
-  res.status(500).send(`转换失败：${error.message}`);
-}
 });
 
 module.exports = app;
