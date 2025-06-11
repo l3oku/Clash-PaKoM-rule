@@ -33,19 +33,16 @@ app.get('/', async (req, res) => {
     const fixedConfig = await loadConfig(FIXED_CONFIG_URL);
     const isSingboxJson = Array.isArray(fixedConfig.outbounds);
 
-    // 原始模板代理列表（Clash proxies 或 SingBox outbounds）
     let templateProxies = isSingboxJson
       ? fixedConfig.outbounds.filter(o => o.tag && ['shadowsocks','vmess','trojan','http','socks'].includes(o.type)).map(o => ({ name: o.tag, type: o.type, server: o.server, port: o.port, cipher: o.cipher, password: o.password }))
       : Array.isArray(fixedConfig.proxies) ? [...fixedConfig.proxies] : [];
 
-    // 获取订阅并解码
     let raw = (await axios.get(subUrl, { headers: { 'User-Agent': 'Config Merger' }, responseType: 'text' })).data;
     try {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8');
       if (/^\s*(\{|\[|proxies:)/.test(decoded)) raw = decoded;
     } catch {}
 
-    // 解析订阅内容
     let subConfig;
     if (/proxies:|^---/.test(raw)) subConfig = yaml.load(raw);
     else {
@@ -60,27 +57,29 @@ app.get('/', async (req, res) => {
     const subProxies = Array.isArray(subConfig.proxies) ? subConfig.proxies : [];
 
     if (subProxies.length) {
-      // 合并并去重
       const combined = [...templateProxies];
-      // 替换首条
       Object.assign(combined[0] || {}, subProxies[0]);
       combined.push(...subProxies);
       const seen = new Set();
       const mergedClash = combined.filter(p => p.name && !seen.has(p.name) && seen.add(p.name));
 
       if (isSingboxJson) {
-        // 构建 tag->outbound map
         const map = new Map(fixedConfig.outbounds.map(o => [o.tag, o]));
-        // 更新或添加节点
         mergedClash.forEach(p => {
           const ob = clashToSingboxOutbound(p);
-          if (map.has(ob.tag)) {
-            Object.assign(map.get(ob.tag), ob);
-          } else {
-            map.set(ob.tag, ob);
-          }
+          map.set(ob.tag, Object.assign(map.get(ob.tag) || {}, ob));
         });
         fixedConfig.outbounds = Array.from(map.values());
+
+        // 修复所有 selector/urltest/fallback 组中的 tags
+        const groupKeys = ['selector', 'urltest', 'fallback', 'urltest_random'];
+        if (Array.isArray(fixedConfig.outbounds)) {
+          fixedConfig.outbounds.forEach(group => {
+            if (groupKeys.includes(group.type) && Array.isArray(group.outbounds)) {
+              group.outbounds = group.outbounds.filter(tag => fixedConfig.outbounds.some(o => o.tag === tag));
+            }
+          });
+        }
       } else {
         fixedConfig.proxies = mergedClash;
         if (Array.isArray(fixedConfig['proxy-groups'])) {
