@@ -12,10 +12,8 @@ async function loadConfig(url) {
 
   // JSON 判断：尝试解析
   try {
-    const json = JSON.parse(data);
-    return json;
-  } catch (e) {
-    // 不是合法 JSON，则作为 YAML 处理
+    return JSON.parse(data);
+  } catch {
     return yaml.load(data);
   }
 }
@@ -33,13 +31,13 @@ app.get('/', async (req, res) => {
     const subRes = await axios.get(subUrl, { headers: { 'User-Agent': 'Config Merger' }, responseType: 'text' });
     let raw = subRes.data;
 
-    // Base64 解码候选
+    // Base64 解码尝试
     try {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8');
       if (decoded.includes('proxies:') || decoded.trim().startsWith('[') || decoded.trim().startsWith('{')) {
         raw = decoded;
       }
-    } catch (_) {}
+    } catch {}
 
     // 订阅解析
     let subConfig;
@@ -48,15 +46,19 @@ app.get('/', async (req, res) => {
     } else {
       try {
         subConfig = JSON.parse(raw);
-      } catch (_) {
-        // 自定义纯文本处理
+      } catch {
         subConfig = {
           proxies: raw.split('\n').filter(Boolean).map(line => {
             const parts = line.split('|');
-            return parts.length >= 5 ? {
+            if (parts.length < 5) return null;
+            return {
               name: `${parts[1]}-${parts[2]}`,
-              type: parts[0], server: parts[1], port: +parts[2], cipher: parts[3], password: parts[4]
-            } : null;
+              type: parts[0],
+              server: parts[1],
+              port: +parts[2],
+              cipher: parts[3],
+              password: parts[4]
+            };
           }).filter(Boolean)
         };
       }
@@ -65,34 +67,34 @@ app.get('/', async (req, res) => {
     // 合并逻辑
     if (Array.isArray(subConfig.proxies) && subConfig.proxies.length) {
       const templateProxies = [...fixedConfig.proxies];
-      // 替换第一个模板
+      // 替换模板第一个节点
       if (templateProxies[0]) {
-        const p = subConfig.proxies[0];
-        templateProxies[0] = { ...templateProxies[0], ...p };
+        Object.assign(templateProxies[0], subConfig.proxies[0]);
       }
       // 合并并去重
-      const all = [...templateProxies, ...subConfig.proxies];
+      const combined = [...templateProxies, ...subConfig.proxies];
       const seen = new Set();
-      fixedConfig.proxies = all.filter(p => p.name && !seen.has(p.name) && seen.add(p.name));
+      fixedConfig.proxies = combined.filter(p => p.name && !seen.has(p.name) && seen.add(p.name));
 
-      // 更新分组
+      // 更新 proxy-groups
       if (Array.isArray(fixedConfig['proxy-groups'])) {
-        fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(g => {
-          if (g.name === 'PROXY' && Array.isArray(g.proxies)) {
-            g.proxies = g.proxies.filter(n => fixedConfig.proxies.some(p => p.name === n));
+        fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(group => {
+          if (group.name === 'PROXY' && Array.isArray(group.proxies)) {
+            group.proxies = group.proxies.filter(name => fixedConfig.proxies.some(p => p.name === name));
           }
-          return g;
+          return group;
         });
       }
     }
 
-    // 输出
-    const out = url.endsWith('.json') || FIXED_CONFIG_URL.endsWith('.json')
+    // 根据 FIXED_CONFIG_URL 或 请求参数判断输出格式
+    const isJsonOutput = FIXED_CONFIG_URL.endsWith('.json') || subUrl.endsWith('.json');
+    const output = isJsonOutput
       ? JSON.stringify(fixedConfig, null, 2)
       : yaml.dump(fixedConfig);
 
-    res.set('Content-Type', url.endsWith('.json') || FIXED_CONFIG_URL.endsWith('.json') ? 'application/json' : 'text/yaml');
-    res.send(out);
+    res.set('Content-Type', isJsonOutput ? 'application/json' : 'text/yaml');
+    res.send(output);
   } catch (err) {
     res.status(500).send(`转换失败：${err.message}`);
   }
