@@ -9,16 +9,12 @@ const FIXED_CONFIG_URL = 'https://raw.githubusercontent.com/6otho/singbox-Peizhi
 async function loadConfig(url) {
   const res = await axios.get(url, { headers: { 'User-Agent': 'Config Merger' }, responseType: 'text' });
   const data = res.data;
-  try {
-    return JSON.parse(data);
-  } catch {
-    return yaml.load(data);
-  }
+  try { return JSON.parse(data); } catch { return yaml.load(data); }
 }
 
 // 将 Clash 代理对象转换为 SingBox 出站配置
 function clashToSingboxOutbound(proxy) {
-  const outbound = {
+  return {
     tag: proxy.name,
     type: proxy.type === 'ss' ? 'shadowsocks' : proxy.type,
     server: proxy.server,
@@ -27,7 +23,6 @@ function clashToSingboxOutbound(proxy) {
     password: proxy.password,
     udp: true
   };
-  return outbound;
 }
 
 app.get('/', async (req, res) => {
@@ -40,27 +35,22 @@ app.get('/', async (req, res) => {
 
     // 原始模板代理列表（Clash proxies 或 SingBox outbounds）
     let templateProxies = isSingboxJson
-      ? fixedConfig.outbounds.map(o => ({ ...o, name: o.tag }))
-      : Array.isArray(fixedConfig.proxies)
-        ? [...fixedConfig.proxies]
-        : [];
+      ? fixedConfig.outbounds.filter(o => o.tag && ['shadowsocks','vmess','trojan','http','socks'].includes(o.type)).map(o => ({ name: o.tag, type: o.type, server: o.server, port: o.port, cipher: o.cipher, password: o.password }))
+      : Array.isArray(fixedConfig.proxies) ? [...fixedConfig.proxies] : [];
 
-    // 获取订阅
-    const subRes = await axios.get(subUrl, { headers: { 'User-Agent': 'Config Merger' }, responseType: 'text' });
-    let raw = subRes.data;
+    // 获取订阅并解码
+    let raw = (await axios.get(subUrl, { headers: { 'User-Agent': 'Config Merger' }, responseType: 'text' })).data;
     try {
       const decoded = Buffer.from(raw, 'base64').toString('utf-8');
-      if (decoded.includes('proxies:') || decoded.trim().startsWith('{') || decoded.trim().startsWith('[')) raw = decoded;
+      if (/^\s*(\{|\[|proxies:)/.test(decoded)) raw = decoded;
     } catch {}
 
-    // 解析订阅
+    // 解析订阅内容
     let subConfig;
-    if (raw.includes('proxies:') || raw.trim().startsWith('---')) {
-      subConfig = yaml.load(raw);
-    } else {
-      try {
-        subConfig = JSON.parse(raw);
-      } catch {
+    if (/proxies:|^---/.test(raw)) subConfig = yaml.load(raw);
+    else {
+      try { subConfig = JSON.parse(raw); }
+      catch {
         subConfig = { proxies: raw.split('\n').filter(Boolean).map(line => {
           const parts = line.split('|');
           return parts.length >= 5 ? { name: `${parts[1]}-${parts[2]}`, type: parts[0], server: parts[1], port: +parts[2], cipher: parts[3], password: parts[4] } : null;
@@ -70,16 +60,27 @@ app.get('/', async (req, res) => {
     const subProxies = Array.isArray(subConfig.proxies) ? subConfig.proxies : [];
 
     if (subProxies.length) {
-      // 替换首条
-      if (templateProxies.length) Object.assign(templateProxies[0], subProxies[0]);
       // 合并并去重
-      const combined = [...templateProxies, ...subProxies];
+      const combined = [...templateProxies];
+      // 替换首条
+      Object.assign(combined[0] || {}, subProxies[0]);
+      combined.push(...subProxies);
       const seen = new Set();
       const mergedClash = combined.filter(p => p.name && !seen.has(p.name) && seen.add(p.name));
 
       if (isSingboxJson) {
-        // 转换为 SingBox 出站格式
-        fixedConfig.outbounds = mergedClash.map(clashToSingboxOutbound);
+        // 构建 tag->outbound map
+        const map = new Map(fixedConfig.outbounds.map(o => [o.tag, o]));
+        // 更新或添加节点
+        mergedClash.forEach(p => {
+          const ob = clashToSingboxOutbound(p);
+          if (map.has(ob.tag)) {
+            Object.assign(map.get(ob.tag), ob);
+          } else {
+            map.set(ob.tag, ob);
+          }
+        });
+        fixedConfig.outbounds = Array.from(map.values());
       } else {
         fixedConfig.proxies = mergedClash;
         if (Array.isArray(fixedConfig['proxy-groups'])) {
