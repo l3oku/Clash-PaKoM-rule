@@ -3,115 +3,89 @@ const axios = require('axios');
 const yaml = require('js-yaml');
 const app = express();
 
-const FIXED_CONFIG_URL = 'https://gh.ikuu.eu.org/https://raw.githubusercontent.com/6otho/Yaml-PaKo/refs/heads/main/PAKO_urltest.yaml';
+const FIXED_YAML_URL = 'https://gh.ikuu.eu.org/https://raw.githubusercontent.com/6otho/Yaml-PaKo/refs/heads/main/PAKO_urltest.yaml';
+const FIXED_JSON_URL  = 'https://raw.githubusercontent.com/6otho/singbox-Peizhi/refs/heads/main/singbox1.11.json';
 
-async function loadYaml(url) {
-  const response = await axios.get(url, { headers: { 'User-Agent': 'Clash Verge' } });
-  return yaml.load(response.data);
+// 通用加载函数，自动识别 YAML / JSON
+async function loadConfig(url) {
+  const res = await axios.get(url, { headers: { 'User-Agent': 'Clash Verge' } });
+  const ct = res.headers['content-type'] || '';
+  if (url.endsWith('.json') || ct.includes('application/json')) {
+    return res.data;               // 直接返回 JSON 对象
+  } else {
+    return yaml.load(res.data);    // 解析 YAML
+  }
 }
 
 app.get('/', async (req, res) => {
   const subUrl = req.query.url;
   if (!subUrl) return res.status(400).send('请提供订阅链接，例如 ?url=你的订阅地址');
-  
-  try {
-    // 加载模板配置
-    const fixedConfig = await loadYaml(FIXED_CONFIG_URL);
-    
-    // 确保proxies字段存在且为数组
-    if (!Array.isArray(fixedConfig.proxies)) {
-      fixedConfig.proxies = [];
-    }
 
-    // 获取订阅数据
+  try {
+    // 1. 先加载 YAML 模板
+    const fixedYaml = await loadConfig(FIXED_YAML_URL);
+    // 2. 再加载 SingBox JSON 模板
+    const fixedJson = await loadConfig(FIXED_JSON_URL);
+
+    // 你可以选择优先使用 JSON 模板，或把 JSON 也合并到 YAML 模板里。
+    // 下面示例：以 JSON 为基础，注入 YAML 里没有的部分。
+    const fixedConfig = { 
+      ...fixedJson, 
+      // 如果 JSON 里没有 proxies，就用 YAML 的
+      proxies: Array.isArray(fixedJson.proxies) ? fixedJson.proxies : (Array.isArray(fixedYaml.proxies) ? fixedYaml.proxies : [])
+      // 你也可以把两者合并：proxies: [...(fixedYaml.proxies||[]), ...(fixedJson.proxies||[])]
+    };
+
+    // 以下部分保持不变：拉取订阅、解码、解析为 subConfig.proxies 数组……
     const response = await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' } });
     let decodedData = response.data;
-    
-    // Base64解码处理
     try {
-      const tempDecoded = Buffer.from(decodedData, 'base64').toString('utf-8');
-      if (tempDecoded.includes('proxies:') || tempDecoded.includes('port:')) {
-        decodedData = tempDecoded;
-      }
+      const tmp = Buffer.from(decodedData, 'base64').toString('utf-8');
+      if (tmp.includes('proxies:') || tmp.includes('port:')) decodedData = tmp;
     } catch (e) {}
 
-    // 解析订阅数据
     let subConfig;
     if (decodedData.includes('proxies:')) {
       subConfig = yaml.load(decodedData);
     } else {
-      // 自定义格式解析
       subConfig = {
-        proxies: decodedData.split('\n')
-          .filter(line => line.trim())
-          .map(line => {
-            const parts = line.split('|');
-            return parts.length >= 5 ? {
-              name: `${parts[1]}-${parts[2]}`,
-              type: parts[0] || 'ss',
-              server: parts[1],
-              port: parseInt(parts[2]),
-              cipher: parts[3] || 'aes-256-gcm',
-              password: parts[4]
-            } : null;
-          })
-          .filter(Boolean)
+        proxies: decodedData.split('\n').filter(l => l.trim()).map(line => {
+          const p = line.split('|');
+          return p.length>=5 ? {
+            name: `${p[1]}-${p[2]}`, type: p[0]||'ss',
+            server: p[1], port: +p[2],
+            cipher: p[3]||'aes-256-gcm', password: p[4]
+          } : null;
+        }).filter(Boolean)
       };
     }
 
-    // 核心逻辑：混合模板与订阅代理
-    if (subConfig?.proxies?.length > 0) {
-      // 1. 保留模板所有代理
-      const templateProxies = [...fixedConfig.proxies];
-
-      // 2. 替换第一个代理的服务器信息（保留名称）
-      if (templateProxies.length > 0) {
-        const subProxy = subConfig.proxies[0];
-        templateProxies[0] = {
-          ...templateProxies[0],  // 保留名称和默认配置
-          server: subProxy.server,
-          port: subProxy.port || templateProxies[0].port,
-          password: subProxy.password || templateProxies[0].password,
-          cipher: subProxy.cipher || templateProxies[0].cipher,
-          type: subProxy.type || templateProxies[0].type
-        };
+    // 接下来同你原逻辑：替换第一个 proxy，合并、去重、更新 proxy-groups……
+    if (subConfig.proxies.length) {
+      const tplProxies = [...fixedConfig.proxies];
+      // 替换逻辑
+      const sp = subConfig.proxies[0];
+      if (tplProxies.length) {
+        tplProxies[0] = { ...tplProxies[0], server: sp.server, port: sp.port, password: sp.password, cipher: sp.cipher, type: sp.type };
       }
-
-      // 3. 合并代理列表（模板代理 + 订阅代理）
-      const mergedProxies = [...templateProxies, ...subConfig.proxies];
-
-      // 4. 根据名称去重（保留第一个出现的代理）
-      const seen = new Map();
-      fixedConfig.proxies = mergedProxies.filter(proxy => {
-        if (!proxy?.name) return false;
-        if (!seen.has(proxy.name)) {
-          seen.set(proxy.name, true);
-          return true;
-        }
-        return false;
-      });
-
-      // 5. 更新PROXY组
+      const merged = [...tplProxies, ...subConfig.proxies];
+      const seen = new Set();
+      fixedConfig.proxies = merged.filter(p => p.name && !seen.has(p.name) && seen.add(p.name));
+      // 更新 proxy-groups
       if (Array.isArray(fixedConfig['proxy-groups'])) {
-        fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(group => {
-          if (group.name === 'PROXY' && Array.isArray(group.proxies)) {
-            // 保留原有名称顺序，实际连接已更新
-            return {
-              ...group,
-              proxies: group.proxies.filter(name => 
-                fixedConfig.proxies.some(p => p.name === name)
-              )
-            };
+        fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(g => {
+          if (g.name === 'PROXY' && Array.isArray(g.proxies)) {
+            return { ...g, proxies: g.proxies.filter(n => fixedConfig.proxies.some(p=>p.name===n)) };
           }
-          return group;
+          return g;
         });
       }
     }
 
     res.set('Content-Type', 'text/yaml');
     res.send(yaml.dump(fixedConfig));
-  } catch (error) {
-    res.status(500).send(`转换失败：${error.message}`);
+  } catch (err) {
+    res.status(500).send(`转换失败：${err.message}`);
   }
 });
 
