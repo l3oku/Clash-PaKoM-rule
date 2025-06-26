@@ -3,7 +3,7 @@ const axios = require('axios');
 const yaml = require('js-yaml');
 const app = express();
 
-const FIXED_CONFIG_URL = 'https://raw.githubusercontent.com/6otho/Yaml-PaKo/refs/heads/main/PAKO_fallback.yaml';
+const FIXED_CONFIG_URL = 'https://gh.ikuu.eu.org/https://raw.githubusercontent.com/6otho/Yaml-PaKo/refs/heads/main/PAKO_urltest.yaml';
 
 async function loadYaml(url) {
   const response = await axios.get(url, { headers: { 'User-Agent': 'Clash Verge' } });
@@ -13,34 +13,30 @@ async function loadYaml(url) {
 app.get('/', async (req, res) => {
   const subUrl = req.query.url;
   if (!subUrl) return res.status(400).send('请提供订阅链接，例如 ?url=你的订阅地址');
-  
+
   try {
     // 加载模板配置
     const fixedConfig = await loadYaml(FIXED_CONFIG_URL);
-    
-    // 确保proxies字段存在且为数组
-    if (!Array.isArray(fixedConfig.proxies)) {
-      fixedConfig.proxies = [];
-    }
+    if (!Array.isArray(fixedConfig.proxies)) fixedConfig.proxies = [];
 
     // 获取订阅数据
     const response = await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' } });
     let decodedData = response.data;
-    
-    // Base64解码处理
+
+    // 尝试 Base64 解码
     try {
-      const tempDecoded = Buffer.from(decodedData, 'base64').toString('utf-8');
-      if (tempDecoded.includes('proxies:') || tempDecoded.includes('port:')) {
-        decodedData = tempDecoded;
+      const maybe = Buffer.from(decodedData, 'base64').toString('utf-8');
+      if (maybe.includes('proxies:') || maybe.includes('proxy-groups:')) {
+        decodedData = maybe;
       }
     } catch (e) {}
 
-    // 解析订阅数据
-    let subConfig;
+    // 解析订阅 YAML
+    let subConfig = {};
     if (decodedData.includes('proxies:')) {
       subConfig = yaml.load(decodedData);
     } else {
-      // 自定义格式解析
+      // 非标准格式，构造基本代理
       subConfig = {
         proxies: decodedData.split('\n')
           .filter(line => line.trim())
@@ -54,35 +50,19 @@ app.get('/', async (req, res) => {
               cipher: parts[3] || 'aes-256-gcm',
               password: parts[4]
             } : null;
-          })
-          .filter(Boolean)
+          }).filter(Boolean)
       };
     }
 
-    // 核心逻辑：混合模板与订阅代理
-    if (subConfig?.proxies?.length > 0) {
-      // 1. 保留模板所有代理
-      const templateProxies = [...fixedConfig.proxies];
+    // 混合逻辑开始
+    if (Array.isArray(subConfig.proxies) && subConfig.proxies.length > 0) {
+      // 合并代理（模板代理 + 订阅代理）
+      const templateProxies = fixedConfig.proxies;
+      const allProxies = [...templateProxies, ...subConfig.proxies];
 
-      // 2. 替换第一个代理的服务器信息（保留名称）
-      if (templateProxies.length > 0) {
-        const subProxy = subConfig.proxies[0];
-        templateProxies[0] = {
-          ...templateProxies[0],  // 保留名称和默认配置
-          server: subProxy.server,
-          port: subProxy.port || templateProxies[0].port,
-          password: subProxy.password || templateProxies[0].password,
-          cipher: subProxy.cipher || templateProxies[0].cipher,
-          type: subProxy.type || templateProxies[0].type
-        };
-      }
-
-      // 3. 合并代理列表（模板代理 + 订阅代理）
-      const mergedProxies = [...templateProxies, ...subConfig.proxies];
-
-      // 4. 根据名称去重（保留第一个出现的代理）
+      // 根据 name 去重（保留订阅原始结构，包括 traffic 字段）
       const seen = new Map();
-      fixedConfig.proxies = mergedProxies.filter(proxy => {
+      fixedConfig.proxies = allProxies.filter(proxy => {
         if (!proxy?.name) return false;
         if (!seen.has(proxy.name)) {
           seen.set(proxy.name, true);
@@ -91,16 +71,14 @@ app.get('/', async (req, res) => {
         return false;
       });
 
-      // 5. 更新PROXY组
+      // 更新 proxy-groups 中的代理名
       if (Array.isArray(fixedConfig['proxy-groups'])) {
+        const validNames = fixedConfig.proxies.map(p => p.name);
         fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(group => {
-          if (group.name === 'PROXY' && Array.isArray(group.proxies)) {
-            // 保留原有名称顺序，实际连接已更新
+          if (Array.isArray(group.proxies)) {
             return {
               ...group,
-              proxies: group.proxies.filter(name => 
-                fixedConfig.proxies.some(p => p.name === name)
-              )
+              proxies: group.proxies.filter(name => validNames.includes(name))
             };
           }
           return group;
@@ -109,8 +87,9 @@ app.get('/', async (req, res) => {
     }
 
     res.set('Content-Type', 'text/yaml');
-    res.send(yaml.dump(fixedConfig));
+    res.send(yaml.dump(fixedConfig, { lineWidth: -1 }));
   } catch (error) {
+    console.error(error);
     res.status(500).send(`转换失败：${error.message}`);
   }
 });
