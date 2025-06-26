@@ -108,6 +108,28 @@ app.get('/', async (req, res) => {
       }
     }
 
+    // ========== 新增：流量统计配置 ==========
+    // 添加流量统计支持
+    fixedConfig['external-controller'] = '127.0.0.1:9090'; // 流量统计API端口
+    fixedConfig.secret = 'your_secret_key'; // 认证密钥（建议修改）
+    
+    // 添加流量统计代理组（如果不存在）
+    const hasTrafficGroup = fixedConfig['proxy-groups']?.some(
+      g => g.name === '流量统计'
+    );
+    
+    if (!hasTrafficGroup) {
+      fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'] || [];
+      fixedConfig['proxy-groups'].unshift({
+        name: '流量统计',
+        type: 'select',
+        proxies: [
+          'DIRECT', 
+          ...(fixedConfig.proxies?.map(p => p.name) || [])
+        ]
+      });
+    }
+
     res.set('Content-Type', 'text/yaml');
     res.send(yaml.dump(fixedConfig));
   } catch (error) {
