@@ -1,127 +1,117 @@
-// index.js
 const express = require('express');
-const axios   = require('axios');
-const yaml    = require('js-yaml');
-
+const axios = require('axios');
+const yaml = require('js-yaml');
 const app = express();
-const FIXED_CONFIG_URL = 'https://gh.ikuu.eu.org/https://raw.githubusercontent.com/6otho/Yaml-PaKo/refs/heads/main/PAKO_urltest-CaiSe.yaml';
+
+const FIXED_CONFIG_URL = 'https://raw.githubusercontent.com/6otho/Yaml-PaKo/refs/heads/main/PAKO_urltest-CaiSe.yaml';
 
 async function loadYaml(url) {
-  const { data } = await axios.get(url, { headers: { 'User-Agent': 'Clash Verge' } });
-  return yaml.load(data);
-}
-
-/**
- * 根据订阅 URL 推断常见的流量 API 路径
- */
-function inferTrafficApi(subUrl) {
-  try {
-    const u = new URL(subUrl);
-    // V2Board: /api/v1/client/get?token=…
-    if (u.pathname.includes('/client/get')) return subUrl;
-    // SSRPanel V4: /api/v1/client/subscribe → /api/v1/client/usage
-    if (u.pathname.includes('/client/subscribe')) {
-      u.pathname = u.pathname.replace('/client/subscribe', '/client/usage');
-      return u.toString();
-    }
-    // Sspanel V3: /user/api/subscribe? … → /user/getUserInfo?
-    if (u.pathname.includes('/user/api/subscribe')) {
-      u.pathname = u.pathname.replace('/user/api/subscribe', '/user/getUserInfo');
-      return u.toString();
-    }
-  } catch (e) { /* ignore */ }
-  return '';
-}
-
-async function fetchTrafficData(apiUrl) {
-  if (!apiUrl) return {};
-  try {
-    const { data } = await axios.get(apiUrl, { timeout: 5000 });
-    // 期望 data 是 [{ name, upload, download, total }, …]
-    if (!Array.isArray(data)) return {};
-    return data.reduce((m, it) => {
-      if (it.name) m[it.name] = it;
-      return m;
-    }, {});
-  } catch (err) {
-    console.error('拉取流量失败:', err.message);
-    return {};
-  }
+  const response = await axios.get(url, { headers: { 'User-Agent': 'Clash Verge' } });
+  return yaml.load(response.data);
 }
 
 app.get('/', async (req, res) => {
   const subUrl = req.query.url;
-  if (!subUrl) return res.status(400).send('请提供订阅链接，例如：?url=你的订阅地址');
-
+  if (!subUrl) return res.status(400).send('请提供订阅链接，例如 ?url=你的订阅地址');
+  
   try {
-    // 1. 加载模板
+    // 加载模板配置
     const fixedConfig = await loadYaml(FIXED_CONFIG_URL);
-    fixedConfig.proxies = Array.isArray(fixedConfig.proxies) ? fixedConfig.proxies : [];
+    
+    // 确保proxies字段存在且为数组
+    if (!Array.isArray(fixedConfig.proxies)) {
+      fixedConfig.proxies = [];
+    }
 
-    // 2. 拉取并解析订阅
-    const resp = await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' }, timeout: 10000 });
-    let body = resp.data;
+    // 获取订阅数据
+    const response = await axios.get(subUrl, { headers: { 'User-Agent': 'Clash Verge' } });
+    let decodedData = response.data;
+    
+    // Base64解码处理
     try {
-      const dec = Buffer.from(body, 'base64').toString('utf8');
-      if (/proxies:|proxy-groups:/.test(dec)) body = dec;
-    } catch {}
-    let subConfig = { proxies: [] };
-    if (body.includes('proxies:')) {
-      subConfig = yaml.load(body);
-    } else {
-      subConfig.proxies = body
-        .split('\n').map(l => l.trim()).filter(Boolean)
-        .map(line => {
-          const p = line.split('|');
-          if (p.length < 5) return null;
-          return {
-            name:   `${p[1]}-${p[2]}`,
-            type:   p[0] || 'ss',
-            server: p[1],
-            port:   parseInt(p[2], 10) || 443,
-            cipher: p[3] || 'aes-256-gcm',
-            password: p[4]
-          };
-        }).filter(Boolean);
-    }
-
-    // 3. 合并：模板中“非订阅节点” + 订阅节点（同名以订阅为准）
-    const subNames = new Set(subConfig.proxies.map(p => p.name));
-    const merged = [
-      ...fixedConfig.proxies.filter(p => !subNames.has(p.name)),
-      ...subConfig.proxies
-    ];
-
-    // 4. 决定用哪个流量接口：先看 &api=…，再试推断
-    let trafficApi = req.query.api || inferTrafficApi(subUrl);
-    const trafficMap = await fetchTrafficData(trafficApi);
-    merged.forEach(p => {
-      const t = trafficMap[p.name];
-      if (t) {
-        p.upload   = t.upload;
-        p.download = t.download;
-        p.total    = t.total;
+      const tempDecoded = Buffer.from(decodedData, 'base64').toString('utf-8');
+      if (tempDecoded.includes('proxies:') || tempDecoded.includes('port:')) {
+        decodedData = tempDecoded;
       }
-    });
+    } catch (e) {}
 
-    // 5. 更新 template 对象并修正 proxy-groups
-    fixedConfig.proxies = merged;
-    if (Array.isArray(fixedConfig['proxy-groups'])) {
-      const valid = new Set(merged.map(p => p.name));
-      fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(g => ({
-        ...g,
-        proxies: Array.isArray(g.proxies)
-          ? g.proxies.filter(n => valid.has(n))
-          : g.proxies
-      }));
+    // 解析订阅数据
+    let subConfig;
+    if (decodedData.includes('proxies:')) {
+      subConfig = yaml.load(decodedData);
+    } else {
+      // 自定义格式解析
+      subConfig = {
+        proxies: decodedData.split('\n')
+          .filter(line => line.trim())
+          .map(line => {
+            const parts = line.split('|');
+            return parts.length >= 5 ? {
+              name: `${parts[1]}-${parts[2]}`,
+              type: parts[0] || 'ss',
+              server: parts[1],
+              port: parseInt(parts[2]),
+              cipher: parts[3] || 'aes-256-gcm',
+              password: parts[4]
+            } : null;
+          })
+          .filter(Boolean)
+      };
     }
 
-    // 6. 输出 YAML
-    res.setHeader('Content-Type', 'text/yaml');
-    return res.send(yaml.dump(fixedConfig, { lineWidth: -1 }));
-  } catch (err) {
-    console.error(err);
-    return res.status(500).send(`转换失败：${err.message}`);
+    // 核心逻辑：混合模板与订阅代理
+    if (subConfig?.proxies?.length > 0) {
+      // 1. 保留模板所有代理
+      const templateProxies = [...fixedConfig.proxies];
+
+      // 2. 替换第一个代理的服务器信息（保留名称）
+      if (templateProxies.length > 0) {
+        const subProxy = subConfig.proxies[0];
+        templateProxies[0] = {
+          ...templateProxies[0],  // 保留名称和默认配置
+          server: subProxy.server,
+          port: subProxy.port || templateProxies[0].port,
+          password: subProxy.password || templateProxies[0].password,
+          cipher: subProxy.cipher || templateProxies[0].cipher,
+          type: subProxy.type || templateProxies[0].type
+        };
+      }
+
+      // 3. 合并代理列表（模板代理 + 订阅代理）
+      const mergedProxies = [...templateProxies, ...subConfig.proxies];
+
+      // 4. 根据名称去重（保留第一个出现的代理）
+      const seen = new Map();
+      fixedConfig.proxies = mergedProxies.filter(proxy => {
+        if (!proxy?.name) return false;
+        if (!seen.has(proxy.name)) {
+          seen.set(proxy.name, true);
+          return true;
+        }
+        return false;
+      });
+
+      // 5. 更新PROXY组
+      if (Array.isArray(fixedConfig['proxy-groups'])) {
+        fixedConfig['proxy-groups'] = fixedConfig['proxy-groups'].map(group => {
+          if (group.name === 'PROXY' && Array.isArray(group.proxies)) {
+            // 保留原有名称顺序，实际连接已更新
+            return {
+              ...group,
+              proxies: group.proxies.filter(name => 
+                fixedConfig.proxies.some(p => p.name === name)
+              )
+            };
+          }
+          return group;
+        });
+      }
+    }
+
+    res.set('Content-Type', 'text/yaml');
+    res.send(yaml.dump(fixedConfig));
+  } catch (error) {
+    res.status(500).send(`转换失败：${error.message}`);
   }
 });
 
